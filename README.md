@@ -29,6 +29,21 @@
 
 其他支持 [Agent Skills](https://agentskills.io/specification) 格式的 AI 工具，也可按各自的导入方式加载同一个文件夹。要在工具内执行本机渲染，宿主还需能访问项目文件并运行 Windows 命令。
 
+## 动手示例 · 生成带门洞的墙体
+
+在 GitHub 给出的 [源码目录](https://github.com/kasaikairos/dsh-code-film)里打开 PowerShell。下面的示例只需要 Python，用 [`examples/panel.json`](examples/panel.json) 定义墙体的尺寸、厚度和门洞。
+
+```powershell
+python skills/code-film-render/tools/construct.py examples/panel.json --out panel.objects.json
+```
+
+生成的 `panel.objects.json` 包含 `objects` 数组。把它加入 [空间镜头配置](skills/code-film-render/topics/space.md)的 `objects`，就可以为墙体安排机位和灯光。更多几何示例见 [构造工具说明](skills/code-film-render/topics/construct.md)。
+
+### 安装排查
+
+- 找不到 `START-HERE.cmd` 或 `engine.zip` 时，确认已下载发行页的 **Windows x64 运行包**并完整解压。发行页同时提供 GitHub 自动生成的源码快照。
+- 能加载 Skill 但无法渲染时，先运行 `START-HERE.cmd` 查看缺项，并确认 Blender 可以单独启动。
+
 ## 仓库内容
 
 - [`skills/code-film-render/`](skills/code-film-render/) 包含 Skill 入口、专题文档、工具源码和 Windows 启动脚本。
@@ -65,11 +80,26 @@ DSH Code Film is a Skill for code-driven 3D animation workflows with DeepSeek.
 
 Other AI tools that support the [Agent Skills](https://agentskills.io/specification) format can load the same folder using their own import workflow. For local rendering from within the tool, the host also needs access to the project files and the ability to run Windows commands.
 
+### Worked example · Build a wall with a doorway
+
+Open PowerShell in a checkout of this repository. This example requires only Python. The [input JSON](examples/panel.json) defines the wall dimensions, thickness, and doorway.
+
+```powershell
+python skills/code-film-render/tools/construct.py examples/panel.json --out panel.objects.json
+```
+
+The output contains an `objects` array. Add those objects to a [3D shot configuration](skills/code-film-render/topics/space.md) to set up a camera and lighting. See the [geometry guide](skills/code-film-render/topics/construct.md) for additional shapes.
+
+#### Troubleshooting
+
+- If `START-HERE.cmd` or `engine.zip` is missing, download and fully extract the **Windows x64 runtime**. GitHub also shows automatically generated source snapshots on the release page.
+- If the Skill loads but rendering fails, run `START-HERE.cmd` to check the remaining dependencies and confirm Blender opens on its own.
+
 ### Repository layout
 
 - [`skills/code-film-render/`](skills/code-film-render/) contains the Skill entry point, workflow guides, tools, and Windows launch scripts.
 - [`engine/`](engine/) contains the rendering engine source and bundled assets.
-- [`examples/`](examples/) contains the sample video thumbnail. Download the runtime and videos from [Releases](https://github.com/kasaikairos/dsh-code-film/releases).
+- [`examples/`](examples/) contains the sample video thumbnail and the geometry example. Download the runtime and videos from [Releases](https://github.com/kasaikairos/dsh-code-film/releases).
 
 ### License
 
