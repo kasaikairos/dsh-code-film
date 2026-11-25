@@ -1,6 +1,8 @@
 ---
 name: code-film-render
-description: 原创代码短片、分段配乐、镜头与 Windows x64 本机 4K 导出。
+description: 用代码制作 3D 动画和短片。适用于搭建 3D 场景、规划分镜和运镜、编排物体运动与分段配乐，以及在 Windows x64 本机渲染和导出最高 4K 视频。
+license: 0BSD
+compatibility: Windows x64 本机渲染需使用完整运行包，并安装 Blender、Python 3.12 x64、Node.js 22.12 或以上、Chrome 和 FFmpeg。
 metadata:
   version: "2083.10"
 ---
