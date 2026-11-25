@@ -1,0 +1,1274 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>space kit</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block;width:100vw;height:100vh}</style>
+<script type="importmap">{ "imports": { "three": "./vendor/three/build/three.module.js" } }</script>
+</head><body><canvas id="gl"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { RoundedBoxGeometry } from './vendor/three/RoundedBoxGeometry.js';
+
+/* =====================================================================
+   kit_space —— 空间与材质（声明式场景）
+   画面 = 前景 / 中景 / 背景 三层 + 接地阴影 + 湿地反光 + 大气
+   约定：window.SPACE_SPEC 由 space.py 注入；window.renderFrame(t) 纯函数。
+   ===================================================================== */
+
+const DEF = {
+  duration: 6, fps: 24, seed: 7,
+  camera: { mode: 'orbit', az: 38, el: 17, dist: 15, fov: 34, target: [0, 1.1, 0],
+            azDrift: 7, distDrift: 0.0, rise: 0.0, focus: 15, aperture: 0.55 },
+  lights: [
+    { kind: 'ambient', color: '#41506b', intensity: 0.55 },
+    { kind: 'dir', dir: [-0.35, -1, -0.45], color: '#cfe0ff', intensity: 0.85, shadow: true },
+  ],
+  ground: { y: 0, size: 46, kind: 'wet_asphalt', tint: '#0b0e14', rough: 0.34,
+            reflectivity: 0.62, puddle: 0.45, ripple: 0.5, sheen: 0.35 },
+  atmosphere: { fog: { color: '#101724', density: 0.032 }, haze: 0.0,
+                rain: { count: 0, speed: 9, slant: 0.16, width: 0.016, color: '#b9cdf0', opacity: 0.5, area: [26, 14, 26] } },
+  post: { exposure: 1.12, bloom: 0.30, bloomThresh: 0.72, grain: 0, vignette: 0.34,
+          ca: 0.0007, sat: 1.06, contrast: 1.04, dof: 0.55, dofMax: 0.012 },
+  background: null,
+};
+
+function merge(base, over) {
+  if (Array.isArray(base) || Array.isArray(over)) return over === undefined ? base : over;
+  if (typeof base !== 'object' || base === null) return over === undefined ? base : over;
+  if (typeof over !== 'object' || over === null) return base;
+  const out = { ...base };
+  for (const k of Object.keys(over)) out[k] = merge(base[k], over[k]);
+  return out;
+}
+const S = merge(DEF, window.SPACE_SPEC || {});
+
+/* ---------- 确定性随机 + 噪声 ---------- */
+function mulberry(seed) {
+  let a = (Number(seed) || 1) >>> 0;
+  return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+const RND = mulberry(S.seed);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const D2R = Math.PI / 180;
+const col = (c, i) => {
+  if (Array.isArray(c)) c = c[clamp(i | 0, 0, c.length - 1)];
+  return new THREE.Color(c);
+};
+function hsl2hex(h, s, l) { const c = new THREE.Color(); c.setHSL(h, s, l); return '#' + c.getHexString(); }
+
+/* ---------- 画布纹理（初始化一次） ---------- */
+const TEX = {};
+function canvasTex(w, h, draw, { repeat = [1, 1], srgb = true, aniso = 4 } = {}) {
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const g = cv.getContext('2d'); draw(g, w, h);
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(repeat[0], repeat[1]);
+  t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  t.anisotropy = aniso; t.needsUpdate = true;
+  return t;
+}
+function noiseFill(g, w, h, base, amp, scale, seed) {
+  const r = mulberry(seed);
+  g.fillStyle = base; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 2600; i++) {
+    const x = r() * w, y = r() * h, s = 1 + r() * scale;
+    const a = (r() - 0.5) * amp;
+    g.fillStyle = `rgba(${a > 0 ? 255 : 0},${a > 0 ? 255 : 0},${a > 0 ? 255 : 0},${Math.abs(a)})`;
+    g.fillRect(x, y, s, s);
+  }
+}
+function makeTextures() {
+  const sample = mulberry((S.seed ?? 7) + 811);
+  TEX.plaster = canvasTex(256, 256, (g, w, h) => {
+    noiseFill(g, w, h, '#cfc8ba', 0.10, 3, 3);
+    g.globalAlpha = 0.10;
+    for (let y = 0; y < h; y += 32) { g.fillStyle = '#000'; g.fillRect(0, y, w, 1); }
+    g.globalAlpha = 1;
+  }, { repeat: [2, 2] });
+  TEX.concrete = canvasTex(256, 256, (g, w, h) => noiseFill(g, w, h, '#6d6f74', 0.16, 4, 9), { repeat: [3, 3] });
+  TEX.asphalt = canvasTex(256, 256, (g, w, h) => {
+    noiseFill(g, w, h, '#23262c', 0.22, 3, 13);
+    g.globalAlpha = 0.18;
+    for (let i = 0; i < 90; i++) {
+      const x = sample() * w, y = sample() * h;
+      g.fillStyle = '#8b8f96'; g.beginPath(); g.arc(x, y, 0.6 + sample(), 0, 7); g.fill();
+    }
+    g.globalAlpha = 1;
+  }, { repeat: [6, 6] });
+  TEX.tile = canvasTex(256, 256, (g, w, h) => {
+    noiseFill(g, w, h, '#b9b3a6', 0.06, 2, 21);
+    g.strokeStyle = 'rgba(60,55,48,.35)'; g.lineWidth = 2;
+    for (let i = 0; i <= 4; i++) {
+      g.beginPath(); g.moveTo(i * w / 4, 0); g.lineTo(i * w / 4, h); g.stroke();
+      g.beginPath(); g.moveTo(0, i * h / 4); g.lineTo(w, i * h / 4); g.stroke();
+    }
+  }, { repeat: [4, 4] });
+  TEX.brick = canvasTex(256, 256, (g, w, h) => {
+    g.fillStyle = '#4a4038'; g.fillRect(0, 0, w, h);
+    const bh = 32, bw = 64;
+    for (let r = 0; r < h / bh; r++) {
+      for (let c = -1; c < w / bw + 1; c++) {
+        const off = (r % 2) * bw / 2;
+        g.fillStyle = hsl2hex(0.06 + sample() * 0.02, 0.28, 0.30 + sample() * 0.07);
+        g.fillRect(c * bw + off + 2, r * bh + 2, bw - 4, bh - 4);
+      }
+    }
+  }, { repeat: [3, 2] });
+  TEX.wood = canvasTex(256, 256, (g, w, h) => {
+    noiseFill(g, w, h, '#6b4c33', 0.12, 5, 33);
+    g.globalAlpha = 0.25; g.strokeStyle = '#2e1f14'; g.lineWidth = 1;
+    for (let i = 0; i < 26; i++) { const y = sample() * h;
+      g.beginPath(); g.moveTo(0, y); g.bezierCurveTo(w * .3, y + 6, w * .7, y - 6, w, y + 2); g.stroke(); }
+    g.globalAlpha = 1;
+  }, { repeat: [2, 2] });
+  TEX.metal = canvasTex(128, 128, (g, w, h) => {
+    noiseFill(g, w, h, '#8d939c', 0.18, 2, 44);
+  }, { repeat: [1, 1] });
+  TEX.stripes = canvasTex(128, 128, (g, w, h) => {
+    for (let i = 0; i < 8; i++) {
+      g.fillStyle = i % 2 ? '#e8e2d4' : '#b4402f';
+      g.fillRect(0, i * h / 8, w, h / 8);
+    }
+  }, { repeat: [1, 1] });
+  // 运动物体的实时接触阴影：一张软圆斑，跟着物体走
+  TEX.contact = canvasTex(128, 128, (g, w, h) => {
+    const gr = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+    gr.addColorStop(0, 'rgba(0,0,0,0.95)');
+    gr.addColorStop(0.45, 'rgba(0,0,0,0.55)');
+    gr.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, w, h);
+  }, { repeat: [1, 1], srgb: false });
+}
+
+/* ---------- 渲染器 / 场景 ---------- */
+const cv = document.getElementById('gl');
+const [W, H] = window.SPACE_RENDER_SIZE || [1920, 1080];                       // 逻辑画布固定：渲染期间不改尺寸（改尺寸会清空画布）
+cv.width = W; cv.height = H;
+const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, alpha: false,
+  preserveDrawingBuffer: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(1);
+renderer.setSize(W, H, false);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.NoToneMapping;      // 色调映射在后期做（ACES）
+renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+renderer.localClippingEnabled = true;
+makeTextures();
+
+const scene = new THREE.Scene();
+// Static reflection cards are specified in lighting space (directions relative to the subject).
+// They stay off camera and are filtered once for glossy and rough materials.
+if (S.environment?.cards?.length) {
+  const rig = new THREE.Scene();
+  rig.background = new THREE.Color(S.environment.fill || '#15181b');
+  for (const card of S.environment.cards) {
+    const panel = new THREE.Mesh(new THREE.PlaneGeometry(...card.size),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(card.color || '#ffffff')
+        .multiplyScalar(card.intensity ?? 1), side: THREE.DoubleSide }));
+    panel.position.fromArray(card.pos);
+    panel.lookAt(0, 0, 0);
+    rig.add(panel);
+  }
+  const generator = new THREE.PMREMGenerator(renderer);
+  scene.environment = generator.fromScene(rig, 0, 0.01, 100, { size: 128 }).texture;
+  scene.environmentIntensity = S.environment.intensity ?? 1;
+  generator.dispose();
+  for (const panel of rig.children) { panel.geometry.dispose(); panel.material.dispose(); }
+}
+const camera = new THREE.PerspectiveCamera(S.camera.fov, W / H, 0.1, 220);
+const mirrorCam = camera.clone();
+
+/* 背景穹顶：渐变 + 地平线雾色，避免"黑底" */
+let bgMesh = null;
+function buildBackground() {
+  if (bgMesh) { scene.remove(bgMesh); bgMesh.geometry.dispose(); bgMesh.material.dispose(); }
+  const b = S.background || {};
+  const top = new THREE.Color(b.top || '#182236');
+  const hor = new THREE.Color(b.horizon || '#2b3550');
+  const bot = new THREE.Color(b.bottom || b.horizon || '#0d1018');
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { uTop: { value: top }, uHor: { value: hor }, uBot: { value: bot },
+                uGlow: { value: b.glow || 0 }, uGlowColor: { value: new THREE.Color(b.glowColor || '#ffb066') },
+                uGlowPos: { value: new THREE.Vector3(...(b.glowPos || [0.25, 0.1, -0.9])).normalize() } },
+    vertexShader: `varying vec3 vDir; void main(){ vDir = normalize(position); vec4 clip = projectionMatrix * vec4(mat3(viewMatrix) * position, 1.0); gl_Position = clip.xyww; }`,
+    fragmentShader: `
+      varying vec3 vDir; uniform vec3 uTop,uHor,uBot,uGlowColor,uGlowPos; uniform float uGlow;
+      void main(){
+        float y = vDir.y;
+        vec3 c = y > 0.0 ? mix(uHor, uTop, pow(clamp(y,0.0,1.0), 0.65))
+                         : mix(uHor, uBot, pow(clamp(-y,0.0,1.0), 0.5));
+        float g = pow(max(dot(normalize(vDir), uGlowPos), 0.0), 6.0);
+        c += uGlowColor * g * uGlow;
+        gl_FragColor = vec4(c, 1.0);
+      }`,
+  });
+  bgMesh = new THREE.Mesh(new THREE.SphereGeometry(120, 32, 16), mat);
+  bgMesh.frustumCulled = false;
+  bgMesh.renderOrder = -1000;
+  scene.add(bgMesh);
+}
+buildBackground();
+
+/* 雾 */
+if (S.atmosphere.fog && S.atmosphere.fog.density) {
+  scene.fog = new THREE.FogExp2(new THREE.Color(S.atmosphere.fog.color).getHex(),
+    S.atmosphere.fog.density);
+}
+
+/* ---------- 灯光 ---------- */
+const lights = [];
+function buildLights() {
+  lights.forEach(l => { if (l.light && l.light.dispose) l.light.dispose(); });
+  lights.length = 0;
+  for (const spec of S.lights) {
+    const c = col(spec.color || '#ffffff');
+    let l = null;
+    if (spec.kind === 'ambient') {
+      l = new THREE.AmbientLight(c, spec.intensity ?? 0.4);
+    } else if (spec.kind === 'hemi') {
+      l = new THREE.HemisphereLight(c, col(spec.groundColor || '#20242e'), spec.intensity ?? 0.4);
+    } else if (spec.kind === 'dir') {
+      l = new THREE.DirectionalLight(c, spec.intensity ?? 1);
+      const d = new THREE.Vector3(...(spec.dir || [0, -1, 0])).normalize();
+      l.position.copy(d.clone().multiplyScalar(-18));
+      l.target.position.set(0, 0, 0); scene.add(l.target);
+      if (spec.shadow !== false) {
+        l.castShadow = true;
+        const sc = l.shadow.camera;
+        const span = Number.isFinite(spec.shadowSpan) && spec.shadowSpan > 0 ? spec.shadowSpan : 32;
+        if (Array.isArray(spec.shadowCenter)) {
+          l.target.position.fromArray(spec.shadowCenter);
+          l.position.add(l.target.position);
+        }
+        sc.left = sc.bottom = -span / 2; sc.right = sc.top = span / 2; sc.near = 1; sc.far = 60;
+        l.shadow.mapSize.set(2048, 2048);
+        l.shadow.bias = S.ground.physicalLighting ? -Math.min(0.0009, span / 65000) : -0.0009;
+        l.shadow.normalBias = Math.min(0.02, span / 1600);
+      }
+    } else if (spec.kind === 'point') {
+      l = new THREE.PointLight(c, spec.intensity ?? 8, spec.dist ?? 0, spec.decay ?? 2);
+      l.position.set(...(spec.pos || [0, 3, 0]));
+      if (spec.shadow) {
+        l.castShadow = true; l.shadow.mapSize.set(1024, 1024);
+        l.shadow.bias = -0.004; l.shadow.normalBias = 0.03;
+      }
+    } else if (spec.kind === 'spot') {
+      l = new THREE.SpotLight(c, spec.intensity ?? 20, spec.dist ?? 0, (spec.angle ?? 40) * D2R,
+        spec.penumbra ?? 0.5, spec.decay ?? 2);
+      l.position.set(...(spec.pos || [0, 6, 0]));
+      l.target.position.set(...(spec.target || [0, 0, 0]));
+      scene.add(l.target);
+      if (spec.shadow) {
+        l.castShadow = true; l.shadow.mapSize.set(1024, 1024);
+        l.shadow.bias = -0.002; l.shadow.normalBias = 0.02;
+        l.shadow.camera.near = 0.5; l.shadow.camera.far = 40;
+      }
+    }
+    if (!l) continue;
+    l.userData.spec = spec;
+    scene.add(l);
+    lights.push({ spec, light: l });
+  }
+}
+buildLights();
+
+/* ---------- 材质 ---------- */
+function material(spec, seedIdx) {
+  const m = spec || {};
+  const base = col(m.albedo ?? m.color ?? '#b9b3a6', seedIdx || 0);
+  const texName = m.tex || null;
+  let map = texName && TEX[texName] ? TEX[texName] : null;
+  if (map && m.texScale) {
+    // 每米纹理密度：不同尺寸的面上砂粒/砖缝尺度应该一致
+    map = map.clone();
+    map.needsUpdate = true;
+    map.repeat.set(map.repeat.x * m.texScale, map.repeat.y * m.texScale);
+  }
+  const params = {
+    color: base,
+    roughness: m.rough ?? 0.8,
+    metalness: m.metal ?? 0.0,
+    map: map || undefined,
+    transparent: !!m.transparent,
+    opacity: m.opacity ?? 1,
+    side: m.side === 'double' ? THREE.DoubleSide : THREE.FrontSide,
+  };
+  if (map) params.color = base.clone().multiplyScalar(1.0);
+  if (m.emissive) {
+    params.emissive = col(m.emissive);
+    params.emissiveIntensity = m.emissiveIntensity ?? 1;
+    if (m.tex === 'sign') params.map = signTex(m);
+  }
+  if (texName === 'sign') params.map = signTex(m);
+  const mat = new THREE.MeshStandardMaterial(params);
+  if (m.flat) mat.flatShading = true;
+  mat.userData.spec = m;
+  return mat;
+}
+function signTex(m) {
+  const key = 'sign:' + (m.text || '') + (m.bg || '') + (m.fg || '');
+  if (TEX[key]) return TEX[key];
+  const w = 512, h = 128;
+  TEX[key] = canvasTex(w, h, (g) => {
+    g.fillStyle = m.bg || '#2f6fd0'; g.fillRect(0, 0, w, h);
+    g.fillStyle = m.fg || '#f2f6ff';
+    g.font = `bold ${m.fontSize || 64}px "Microsoft YaHei","Noto Sans SC",sans-serif`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(m.text || '', w / 2, h / 2 + 2);
+  }, { repeat: [1, 1] });
+  return TEX[key];
+}
+
+/* ---------- 几何 ---------- */
+const SHAPES = {};
+function applyTransform(obj, o) {
+  const p = o.pos || [0, 0, 0], r = o.rot || [0, 0, 0], s = o.scale || [1, 1, 1];
+  obj.position.set(p[0], p[1], p[2]);
+  obj.rotation.set(r[0] * D2R, r[1] * D2R, r[2] * D2R);
+  obj.scale.set(s[0], s[1], s[2]);
+}
+function meshOf(geo, o, mat) {
+  const m = new THREE.Mesh(geo, mat);
+  applyTransform(m, o);
+  m.castShadow = o.shadow !== false;
+  m.receiveShadow = o.receive !== false;
+  m.userData.spec = o;
+  return m;
+}
+function geoFor(o) {
+  switch (o.kind) {
+    case 'box': {
+      const size = o.size || [1, 1, 1];
+      const radius = Math.min(o.edgeRadius || 0, Math.min(...size) / 2);
+      if (radius > 0) return new RoundedBoxGeometry(...size, 2, radius);
+      return new THREE.BoxGeometry(...size);
+    }
+    case 'sphere': return new THREE.SphereGeometry(o.r ?? 0.5, o.seg ?? 24, (o.seg ?? 24) / 2);
+    case 'cyl': return new THREE.CylinderGeometry(o.rTop ?? o.r ?? 0.5, o.rBot ?? o.r ?? 0.5,
+      o.h ?? 1, o.seg ?? 24, 1, !!o.open);
+    case 'leaf': {
+      // The origin is the attachment point. Curved wide leaves and narrow blades share this mesh.
+      const widths = o.blade ? [0.30, 0.42, 0.30, 0.16] : [0.28, 0.50, 0.48, 0.28];
+      const vertices = [0, 0, 0], faces = [];
+      for (let i = 0; i < widths.length; i++) {
+        const y = (i + 1) / 5, w = widths[i], z = (o.blade ? 0.46 : 0.15) * y * y;
+        vertices.push(-w, y, z, 0, y, z + 0.11 * w, w, y, z);
+      }
+      vertices.push(0, 1, o.blade ? 0.53 : 0.17);
+      faces.push(0, 1, 2, 0, 2, 3);
+      for (let r = 1; r < 10; r += 3) {
+        faces.push(r, r+3, r+4, r, r+4, r+1, r+1, r+4, r+5, r+1, r+5, r+2);
+      }
+      faces.push(10, 13, 11, 11, 13, 12);
+      const blade = new THREE.BufferGeometry();
+      blade.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      blade.setIndex(faces);
+      blade.computeVertexNormals();
+      return blade;
+    }
+    case 'plane': return new THREE.PlaneGeometry(...(o.size || [1, 1]), o.wSeg ?? 1, o.hSeg ?? 1);
+    case 'torus': return new THREE.TorusGeometry(o.r ?? 0.5, o.tube ?? 0.1, 12, o.seg ?? 48);
+    case 'lathe': {
+      const pts = (o.profile || [[0.5, 0], [0.5, 1]]).map(p => new THREE.Vector2(p[0], p[1]));
+      return new THREE.LatheGeometry(pts, o.seg ?? 24);
+    }
+    case 'extrude': {
+      const sh = new THREE.Shape();
+      const pts = o.points || [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
+      sh.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) sh.lineTo(pts[i][0], pts[i][1]);
+      sh.closePath();
+      return new THREE.ExtrudeGeometry(sh, { depth: o.depth ?? 0.2, bevelEnabled: !!o.bevel,
+        bevelSize: o.bevelSize ?? 0.02, bevelThickness: o.bevelThickness ?? 0.02, bevelSegments: 2, curveSegments: 6 });
+    }
+    default: return new THREE.BoxGeometry(1, 1, 1);
+  }
+}
+const foliageTime = { value: 0 };
+function bendFoliage(mesh, spec) {
+  const strength = Number(spec.wind.strength);
+  if (!(strength > 0)) return;
+  const direction = new THREE.Vector2(...(spec.wind.direction || [1, 0]));
+  if (direction.lengthSq() === 0) return;
+  direction.normalize();
+  const tuning = new THREE.Vector3(direction.x, direction.y, Math.min(strength, 0.35));
+  function wire(material) {
+    material.customProgramCacheKey = () => 'space-foliage-wind';
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uFoliageTime = foliageTime;
+      shader.uniforms.uFoliageWind = { value: tuning };
+      shader.vertexShader = 'uniform float uFoliageTime; uniform vec3 uFoliageWind;\n' + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', `
+        #include <begin_vertex>
+        vec3 anchor = (modelMatrix * instanceMatrix[3]).xyz;
+        float phase = dot(anchor.xz, vec2(0.67, 0.94));
+        float air = 0.55 + 0.29 * sin(uFoliageTime * 2.1 - phase)
+                         + 0.16 * sin(uFoliageTime * 3.7 - phase * 2.0);
+        vec3 wind = vec3(uFoliageWind.x, 0.0, uFoliageWind.y);
+        mat3 basis = mat3(modelMatrix) * mat3(instanceMatrix);
+        vec3 localWind = vec3(dot(wind, basis[0]) / dot(basis[0], basis[0]),
+                             dot(wind, basis[1]) / dot(basis[1], basis[1]),
+                             dot(wind, basis[2]) / dot(basis[2], basis[2]));
+        transformed += localWind * (length(basis[1]) * uFoliageWind.z * air * position.y * position.y);
+      `);
+    };
+  }
+  mesh.customDepthMaterial = new THREE.MeshDepthMaterial({
+    depthPacking: THREE.RGBADepthPacking, side: THREE.DoubleSide,
+  });
+  mesh.customDistanceMaterial = new THREE.MeshDistanceMaterial({ side: THREE.DoubleSide });
+  wire(mesh.material);
+  wire(mesh.customDepthMaterial);
+  wire(mesh.customDistanceMaterial);
+}
+function buildObject(o, parent, out) {
+  if (o.hidden) return null;                       // 因果测试用：同一场景里“拿走”一个物体
+  if (o.kind === 'group') {
+    const g = new THREE.Group();
+    applyTransform(g, o);
+    g.userData.spec = o;
+    parent.add(g);
+    (o.children || []).forEach(c => buildObject(c, g, out));
+    return g;
+  }
+  if (o.kind === 'instanced') {
+    const base = { ...o, kind: o.base || 'box' };
+    // instanced 的尺寸以 size 为准：球体半径取 size[0]/2，避免出现 1 米大球
+    if (base.kind === 'sphere' && o.r === undefined) base.r = (o.size && o.size[0] ? o.size[0] : 1) / 2;
+    if (base.kind === 'cyl' && o.h === undefined) base.h = (o.size && o.size[1] ? o.size[1] : 1);
+    const geo = geoFor(base);
+    const mat = material(o.mat || {}, o.ci || 0);
+    const n = o.transforms ? o.transforms.length : (o.count ?? 10);
+    const area = o.area || [4, 4], yJitter = o.yJitter ?? 0, sJitter = o.sJitter ?? 0;
+    const inst = new THREE.InstancedMesh(geo, mat, n);
+    const r = mulberry(o.seed ?? Math.floor(RND() * 1e6));
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < n; i++) {
+      if (o.transforms) {
+        const pose = o.transforms[i];
+        applyTransform(dummy, pose);
+        dummy.updateMatrix();
+        inst.setMatrixAt(i, dummy.matrix);
+        if (pose.color) inst.setColorAt(i, col(pose.color));
+        continue;
+      }
+      const px = (r() - 0.5) * area[0], pz = (r() - 0.5) * area[1];
+      const py = (o.pos ? o.pos[1] : 0) + (r() - 0.5) * yJitter * 2;
+      dummy.position.set((o.pos ? o.pos[0] : 0) + px, py, (o.pos ? o.pos[2] : 0) + pz);
+      const s = 1 + (r() - 0.5) * sJitter;
+      dummy.scale.set(s, s, s);
+      dummy.rotation.set(0, (r() - 0.5) * (o.rotY ?? 0.4), 0);
+      dummy.updateMatrix();
+      inst.setMatrixAt(i, dummy.matrix);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+    if (base.kind === 'leaf' && o.wind) bendFoliage(inst, o);
+    inst.castShadow = o.shadow !== false; inst.receiveShadow = o.receive !== false;
+    parent.add(inst); out.push({ mesh: inst, spec: o });
+    return inst;
+  }
+  const geo = geoFor(o);
+  const mat = material(o.mat || {}, o.ci || 0);
+  const m = meshOf(geo, o, mat);
+  parent.add(m);
+  out.push({ mesh: m, spec: o });
+  return m;
+}
+
+/* ---------- 接地遮蔽（bake 到地面贴图）---------- */
+const AO_SIZE = 1024;
+const aoCanvas = document.createElement('canvas');
+aoCanvas.width = aoCanvas.height = AO_SIZE;
+const aoCtx = aoCanvas.getContext('2d');
+let aoTex = null;
+function groundBounds() {
+  const s = S.ground.size ?? 46;
+  return { min: -s / 2, max: s / 2, size: s };
+}
+function worldToAO(x, z) {
+  const b = groundBounds();
+  return [((x - b.min) / b.size) * AO_SIZE, ((z - b.min) / b.size) * AO_SIZE];
+}
+function collectFootprints(list, parentMatrix, out) {
+  for (const { mesh, spec } of list) {
+    if (spec.contact === false) continue;
+    if (S.ground.physicalLighting) {
+      let owner = mesh;
+      while (owner && !owner.userData.spec?.motion && !owner.userData.spec?.anim) owner = owner.parent;
+      if (owner) continue; // Animated casts are already in the shadow map; never bake their starting pose.
+    }
+    const box = new THREE.Box3().setFromObject(mesh);
+    if (!isFinite(box.min.x)) continue;
+    const y0 = box.min.y, y1 = box.max.y;
+    const surfaceY = S.ground.physicalLighting ? (S.ground.y ?? 0) : 0;
+    if (y0 > surfaceY + 0.45 || y1 < surfaceY - 0.1) continue;          // 悬空物不接地
+    const c = box.getCenter(new THREE.Vector3());
+    out.push({ x: c.x, z: c.z, rx: (box.max.x - box.min.x) / 2, rz: (box.max.z - box.min.z) / 2,
+               strength: spec.contactStrength ?? 1, kind: spec.contactKind || 'blob' });
+  }
+}
+function bakeAO(list) {
+  const b = groundBounds();
+  aoCtx.clearRect(0, 0, AO_SIZE, AO_SIZE);
+  const feet = [];
+  collectFootprints(list, null, feet);
+  const keyDir = (S.lights.find(l => l.kind === 'dir' || l.kind === 'spot') || {});
+  const dir = keyDir.kind === 'spot'
+    ? [keyDir.target[0] - keyDir.pos[0], keyDir.target[1] - keyDir.pos[1], keyDir.target[2] - keyDir.pos[2]]
+    : (keyDir.dir || [0, -1, 0]);
+  const len = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+  const sx = (dir[0] / len) * -1, sz = (dir[2] / len) * -1;   // 影子朝背光方向
+  const shadowLen = Math.min(2.4, Math.abs(dir[1] / len) > 0.05 ? 0.9 / Math.abs(dir[1] / len) : 1.2);
+  for (const f of feet) {
+    const [ax, ay] = worldToAO(f.x, f.z);
+    const rx = (f.rx / b.size) * AO_SIZE, rz = (f.rz / b.size) * AO_SIZE;
+    const grad = aoCtx.createRadialGradient(ax, ay, 0, ax, ay, Math.max(rx, rz) * 1.05 + 3);
+    grad.addColorStop(0, `rgba(0,0,0,${0.62 * f.strength})`);
+    grad.addColorStop(0.55, `rgba(0,0,0,${0.30 * f.strength})`);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    aoCtx.fillStyle = grad;
+    aoCtx.save(); aoCtx.translate(ax, ay);
+    aoCtx.scale(1, Math.max(0.35, rz / Math.max(rx, 1e-3)));
+    aoCtx.beginPath(); aoCtx.arc(0, 0, Math.max(rx, 0.8) + 2, 0, 7); aoCtx.fill();
+    aoCtx.restore();
+    // 方向性拖影（灯一动，影子跟着动）
+    if (S.ground.physicalLighting) continue;
+    const tx = (f.rx / b.size) * AO_SIZE, tz = (f.rz / b.size) * AO_SIZE;
+    for (let k = 1; k <= 6; k++) {
+      const f2 = k / 6;
+      const px = ax + sx * shadowLen * f2 * (AO_SIZE / b.size) * 0.55;
+      const pz = ay + sz * shadowLen * f2 * (AO_SIZE / b.size) * 0.55;
+      aoCtx.fillStyle = `rgba(0,0,0,${0.11 * (1 - f2) * f.strength})`;
+      aoCtx.save(); aoCtx.translate(px, pz);
+      aoCtx.scale(1 + f2 * 0.45, Math.max(0.3, tz / Math.max(tx, 1e-3)) * (1 + f2 * 0.4));
+      aoCtx.beginPath(); aoCtx.arc(0, 0, Math.max(tx, 0.6) * (1 + f2 * 0.4), 0, 7); aoCtx.fill();
+      aoCtx.restore();
+    }
+  }
+  if (!aoTex) {
+    aoTex = new THREE.CanvasTexture(aoCanvas);
+    aoTex.colorSpace = THREE.NoColorSpace;
+    aoTex.needsUpdate = true;
+  } else aoTex.needsUpdate = true;
+  return aoTex;
+}
+
+/* ---------- 地面：湿地反光 ---------- */
+let ground = null, reflectRT = null, texMatrix = new THREE.Matrix4();
+const groundUniforms = {
+  uReflect: { value: null }, uAO: { value: null },
+  uTexMat: { value: new THREE.Matrix4() },
+  uTint: { value: new THREE.Color(S.ground.tint || '#0b0e14') },
+  uRough: { value: S.ground.rough ?? 0.34 },
+  uReflectivity: { value: S.ground.reflectivity ?? 0.6 },
+  uPuddle: { value: S.ground.puddle ?? 0.4 },
+  uRipple: { value: S.ground.ripple ?? 0.5 },
+  uSheen: { value: S.ground.sheen ?? 0.3 },
+  uTime: { value: 0 },
+  uKeyDir: { value: new THREE.Vector3(0, -1, 0) },
+  uKeyColor: { value: new THREE.Color('#cfe0ff') },
+  uKeyIntensity: { value: 0.8 },
+  uAmbient: { value: new THREE.Color('#41506b') },
+  uGroundMin: { value: 0 }, uGroundSize: { value: 46 },
+  uTex: { value: null },
+  uRainDrops: { value: new THREE.Vector2(0.0, 0.0) },
+  uAlpha: { value: 1 },
+};
+const GROUND_VS = `
+  #ifdef SPACE_PHYSICAL_GROUND
+  #include <common>
+  #include <shadowmap_pars_vertex>
+  varying vec3 vViewPosition;
+  #endif
+  varying vec3 vWorld; varying vec2 vUv; varying vec4 vReflUv;
+  uniform mat4 uTexMat;
+  void main(){
+    vUv = uv;
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorld = wp.xyz;
+    vReflUv = uTexMat * wp;
+    vec4 mvPosition = viewMatrix * wp;
+    #ifdef SPACE_PHYSICAL_GROUND
+    vec4 worldPosition = wp;
+    vec3 transformedNormal = normalize(normalMatrix * normal);
+    vViewPosition = -mvPosition.xyz;
+    #include <shadowmap_vertex>
+    #endif
+    gl_Position = projectionMatrix * mvPosition;
+  }`;
+const GROUND_FS = `
+  precision highp float;
+  varying vec3 vWorld; varying vec2 vUv; varying vec4 vReflUv;
+  uniform sampler2D uReflect, uAO, uTex;
+  uniform vec3 uTint, uKeyDir, uKeyColor, uAmbient;
+  uniform float uRough, uReflectivity, uPuddle, uRipple, uSheen, uTime, uKeyIntensity;
+  uniform float uGroundMin, uGroundSize;
+  #ifdef SPACE_PHYSICAL_GROUND
+  varying vec3 vViewPosition;
+  #include <common>
+  #include <packing>
+  #include <lights_pars_begin>
+  #include <shadowmap_pars_fragment>
+  void groundDirect(IncidentLight light, vec3 pos, vec3 N, vec3 V, vec3 unused,
+                    vec3 albedo, inout ReflectedLight result) {
+    float ndl = saturate(dot(N, light.direction));
+    vec3 halfVector = normalize(light.direction + V);
+    float power = mix(6.0, 90.0, 1.0 - uRough);
+    float lobe = pow(saturate(dot(N, halfVector)), power) * uSheen;
+    result.directDiffuse += light.color * albedo * (ndl * RECIPROCAL_PI);
+    result.directSpecular += light.color * (ndl * lobe);
+  }
+  #define RE_Direct groundDirect
+  #endif
+  float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float vnoise(vec2 p){
+    vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+    float a = hash(i), b = hash(i+vec2(1,0)), c = hash(i+vec2(0,1)), d = hash(i+vec2(1,1));
+    return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+  }
+  float fbm(vec2 p){ float s = 0.0, a = 0.5; for(int i=0;i<4;i++){ s += a*vnoise(p); p *= 2.03; a *= 0.5; } return s; }
+  void main(){
+    vec2 auv = (vWorld.xz - uGroundMin) / uGroundSize;
+    float ao = texture2D(uAO, auv).a;
+    float wetN = (uReflectivity > 0.0 || uRipple > 0.01) ? fbm(vWorld.xz * 0.55 + 11.0) : 0.0;
+    float wet = smoothstep(0.30, 0.72, wetN) * uPuddle + (1.0 - uPuddle) * 0.55;
+    wet = clamp(wet, 0.0, 1.0);
+    vec3 base = uTint * (0.95 + 0.55 * fbm(vWorld.xz * 3.1));
+    vec3 tex = texture2D(uTex, vWorld.xz * 0.35).rgb;
+    base = mix(base, base * tex * 2.1, 0.62);
+    // 与视线夹角：掠射时反光更强（Fresnel）
+    vec3 V = normalize(cameraPosition - vWorld);
+    float fres = pow(1.0 - clamp(V.y, 0.0, 1.0), 2.0);
+    // 反射：沿屏幕纵向多 tap，模拟粗糙面竖向拉伸
+    vec2 ruv = vReflUv.xy / max(vReflUv.w, 1e-5);
+    float stretch = 0.0012 + uRough * 0.014;
+    vec2 ripple = vec2(
+      (vnoise(vWorld.xz * 2.3 + uTime * 0.9) - 0.5),
+      (vnoise(vWorld.xz * 1.7 - uTime * 0.7) - 0.5)) * 0.005 * uRipple;
+    vec3 refl = vec3(0.0); float wsum = 0.0;
+    if (uReflectivity > 0.0) for (int i = -4; i <= 4; i++) {
+      float fi = float(i);
+      float w = 1.0 - abs(fi) * 0.17;
+      vec2 uv2 = clamp(ruv + ripple + vec2(fi * stretch * 0.12, fi * stretch * 0.42), 0.001, 0.999);
+      refl += texture2D(uReflect, uv2).rgb * w;
+      wsum += w;
+    }
+    refl /= max(wsum, 1.0);
+    // 湿面本身是深色沥青：反射要被地面颜色吸收一部分，不能当镜子
+    float reflAmt = uReflectivity * (0.22 + 0.78 * wet) * smoothstep(0.0, 0.55, fres);
+    reflAmt *= (1.0 - ao * 0.80);
+    refl *= mix(vec3(0.42), uTint * 1.35 + vec3(0.06), 0.55);
+    // 雨点涟漪环（wet 且有雨时）
+    float ring = 0.0;
+    if (uRipple > 0.01) {
+      vec2 cell = floor(vWorld.xz * 3.0);
+      float h = hash(cell);
+      vec2 cc = fract(vWorld.xz * 3.0) - 0.5;
+      float d = length(cc);
+      float ph = fract(uTime * 0.9 + h);
+      ring = smoothstep(0.02, 0.0, abs(d - ph * 0.45)) * (1.0 - ph);
+    }
+    #ifdef SPACE_PHYSICAL_GROUND
+    vec3 normal = normalize(mat3(viewMatrix) * vec3(0.0, 1.0, 0.0));
+    vec3 material = base;
+    ReflectedLight reflectedLight = ReflectedLight(vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
+    #include <lights_fragment_begin>
+    vec3 fill = getAmbientLightIrradiance(ambientLightColor);
+    #if NUM_HEMI_LIGHTS > 0
+    #pragma unroll_loop_start
+    for (int i = 0; i < NUM_HEMI_LIGHTS; i++) {
+      fill += getHemisphereLightIrradiance(hemisphereLights[i], normal);
+    }
+    #pragma unroll_loop_end
+    #endif
+    vec3 lit = base * fill * RECIPROCAL_PI * (1.0 - ao * 0.65)
+             + reflectedLight.directDiffuse + reflectedLight.directSpecular;
+    vec3 outc = lit + refl * reflAmt + vec3(ring) * 0.06 * uRipple * wet;
+    #else
+    // 光斑：主光在湿地上的高光
+    vec3 H = normalize(normalize(uKeyDir * -1.0) + V);
+    float spec = pow(max(H.y, 0.0), mix(6.0, 90.0, 1.0 - uRough)) * uSheen;
+    vec3 lit = base * (uAmbient * 1.25 + uKeyColor * max(-uKeyDir.y, 0.0) * uKeyIntensity)
+             + uKeyColor * spec * uKeyIntensity;
+    vec3 outc = lit * (1.0 - ao * 0.88) + refl * reflAmt + vec3(ring) * 0.06 * uRipple * wet;
+    #endif
+    gl_FragColor = vec4(outc, 1.0);
+  }`;
+
+function buildGround() {
+  if (ground) { scene.remove(ground); ground.geometry.dispose(); ground.material.dispose(); }
+  const size = S.ground.size ?? 46;
+  const g = new THREE.PlaneGeometry(size, size, 1, 1);
+  g.rotateX(-Math.PI / 2);
+  groundUniforms.uTint.value = new THREE.Color(S.ground.tint || '#0b0e14');
+  groundUniforms.uRough.value = S.ground.rough ?? 0.34;
+  groundUniforms.uReflectivity.value = S.ground.reflectivity ?? 0.6;
+  groundUniforms.uPuddle.value = S.ground.puddle ?? 0.4;
+  groundUniforms.uRipple.value = S.ground.ripple ?? 0.5;
+  groundUniforms.uSheen.value = S.ground.sheen ?? 0.3;
+  groundUniforms.uGroundMin.value = -size / 2;
+  groundUniforms.uGroundSize.value = size;
+  const gt = TEX[S.ground.tex || 'asphalt'] || TEX.asphalt;
+  groundUniforms.uTex.value = gt;
+  groundUniforms.uKeyDir.value = keyDirVec();
+  groundUniforms.uKeyColor.value = col(keyColor());
+  groundUniforms.uKeyIntensity.value = keyIntensity();
+  groundUniforms.uAmbient.value = col(ambientColor()).multiplyScalar(ambientIntensity());
+  const physical = S.ground.physicalLighting === true;
+  const uniforms = physical
+    ? Object.assign(THREE.UniformsUtils.clone(THREE.UniformsLib.lights), groundUniforms)
+    : groundUniforms;
+  const mat = new THREE.ShaderMaterial({ uniforms, lights: physical,
+    defines: physical ? { SPACE_PHYSICAL_GROUND: 1 } : {},
+    vertexShader: GROUND_VS, fragmentShader: GROUND_FS, fog: false });
+  ground = new THREE.Mesh(g, mat);
+  ground.position.y = S.ground.y ?? 0;
+  ground.receiveShadow = physical;
+  ground.renderOrder = -5;
+  scene.add(ground);
+}
+function keyLight() {
+  return S.lights.find(l => (l.kind === 'dir' || l.kind === 'spot') && l.shadow !== false) ||
+         S.lights.find(l => l.kind === 'dir' || l.kind === 'spot') || { kind: 'dir', dir: [0, -1, 0] };
+}
+function keyDirVec() {
+  const k = keyLight();
+  if (k.kind === 'spot') {
+    const d = new THREE.Vector3(k.target[0] - k.pos[0], k.target[1] - k.pos[1], k.target[2] - k.pos[2]);
+    return d.normalize();
+  }
+  return new THREE.Vector3(...(k.dir || [0, -1, 0])).normalize();
+}
+function keyColor() { return keyLight().color || '#cfe0ff'; }
+function keyIntensity() { return keyLight().intensity ?? 1; }
+function ambientColor() { const a = S.lights.find(l => l.kind === 'ambient') || {}; return a.color || '#41506b'; }
+function ambientIntensity() { const a = S.lights.find(l => l.kind === 'ambient') || {}; return a.intensity ?? 0.5; }
+
+/* ---------- 雨 ---------- */
+let rain = null, rainUniforms = null;
+function buildRain() {
+  if (rain) { scene.remove(rain); rain.geometry.dispose(); rain.material.dispose(); rain = null; }
+  const r = S.atmosphere.rain || {};
+  const n = r.count | 0;
+  if (!n) return;
+  const area = r.area || [26, 14, 26];
+  const pos = new Float32Array(n * 6);
+  const seed = new Float32Array(n * 2);
+  const rr = mulberry(S.seed + 77);
+  for (let i = 0; i < n; i++) {
+    const x = (rr() - 0.5) * area[0], y = rr() * area[1], z = (rr() - 0.5) * area[2];
+    const len = 0.12 + rr() * 0.30;
+    pos[i * 6 + 0] = x; pos[i * 6 + 1] = y; pos[i * 6 + 2] = z;
+    pos[i * 6 + 3] = x + (r.slant || 0) * len; pos[i * 6 + 4] = y + len; pos[i * 6 + 5] = z;
+    seed[i * 2] = rr(); seed[i * 2 + 1] = len;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 2));
+  rainUniforms = {
+    uTime: { value: 0 }, uColor: { value: new THREE.Color(r.color || '#b9cdf0') },
+    uOpacity: { value: r.opacity ?? 0.5 }, uSpeed: { value: r.speed ?? 9 },
+    uArea: { value: new THREE.Vector3(...area) }, uFogColor: { value: new THREE.Color(S.atmosphere.fog.color) },
+    uFogDensity: { value: S.atmosphere.fog.density || 0 },
+  };
+  const mat = new THREE.ShaderMaterial({
+    uniforms: rainUniforms, transparent: true, depthWrite: false, blending: THREE.NormalBlending, fog: false,
+    vertexShader: `
+      attribute vec2 aSeed; uniform float uTime, uSpeed; uniform vec3 uArea;
+      varying float vFade; varying float vSeed;
+      void main(){
+        vec3 p = position;
+        float fall = mod(p.y - uTime * uSpeed * (0.7 + aSeed.x * 0.5), uArea.y);
+        p.y = fall;
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        vFade = 1.0;
+        vSeed = aSeed.x;
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor, uFogColor; uniform float uOpacity, uFogDensity;
+      varying float vFade; varying float vSeed;
+      void main(){
+        float a = uOpacity * (0.45 + 0.55 * vSeed);
+        gl_FragColor = vec4(mix(uColor, uFogColor, 0.35), a);
+      }`,
+  });
+  rain = new THREE.LineSegments(geo, mat);
+  rain.frustumCulled = false;
+  scene.add(rain);
+}
+buildRain();
+
+/* ---------- 场景装配 ---------- */
+let builtObjects = [];
+const animated = [];        // {node|light, base:{pos,rot,target}, anim}
+function registerAnim(node, spec, isLight) {
+  const a = spec.anim;
+  const base = { pos: node.position.clone(), rot: [node.rotation.x, node.rotation.y, node.rotation.z], scale: node.scale.clone() };
+  if (isLight && node.target) base.target = node.target.position.clone();
+  if (isLight) base.intensity = node.intensity;
+  animated.push({ node, base, anim: a, isLight: !!isLight });
+}
+function easeK(k, ease) {
+  if (ease === 'inout') return k * k * (3 - 2 * k);
+  if (ease === 'out') return 1 - (1 - k) * (1 - k);
+  if (ease === 'in') return k * k;
+  return k;
+}
+function applyAnim(t) {
+  for (const it of animated) {
+    // 1) 动作（motion）：位移与自转由同一段弧长驱动
+    const m = it.motion;
+    if (m) {
+      const t0 = m.t0 ?? 0, t1 = m.t1 ?? S.duration;
+      const k = easeK(clamp((t - t0) / Math.max(1e-6, t1 - t0), 0, 1), m.ease);
+      const f = m.from, q = m.to;
+      it.node.position.set(f[0] + (q[0] - f[0]) * k, f[1] + (q[1] - f[1]) * k, f[2] + (q[2] - f[2]) * k);
+      if (m.kind === 'path' && m.segs && m.segs.length) {
+        // 多段直线：对正 → 穿过开口 → 停住；按段求值，段内用各自的缓动
+        let seg = m.segs[m.segs.length - 1];
+        for (const s of m.segs) { if (t < s.t1) { seg = s; break; } }
+        const sk = easeK(clamp((t - seg.t0) / Math.max(1e-6, seg.t1 - seg.t0), 0, 1), seg.ease || 'inout');
+        const sf = seg.from, st = seg.to;
+        it.node.position.set(sf[0] + (st[0] - sf[0]) * sk, sf[1] + (st[1] - sf[1]) * sk, sf[2] + (st[2] - sf[2]) * sk);
+        if (seg.rotFrom && seg.rotTo) {
+          // 姿态变化：由递送方向解释的轻微俯仰/偏转
+          it.node.rotation.set((seg.rotFrom[0] + (seg.rotTo[0] - seg.rotFrom[0]) * sk) * D2R,
+                               (seg.rotFrom[1] + (seg.rotTo[1] - seg.rotFrom[1]) * sk) * D2R,
+                               (seg.rotFrom[2] + (seg.rotTo[2] - seg.rotFrom[2]) * sk) * D2R);
+        }
+      } else if (m.kind === 'roll' && m.axis && m.radius) {
+        const ang = (m.angle ?? 0) * k;
+        const ax = new THREE.Vector3(...m.axis).normalize();
+        it.node.quaternion.setFromAxisAngle(ax, ang);
+      } else if (m.kind === 'spin' && m.axis) {
+        it.node.quaternion.setFromAxisAngle(new THREE.Vector3(...m.axis).normalize(), (m.angle ?? 0) * k);
+      } else if (m.kind === 'grow') {
+        // 生长：用来“写出一行字/画出一条线”，与笔的位移共用同一个时间
+        const sx = Math.max(0.001, k);
+        it.node.scale.set(sx * (it.base.scale ? it.base.scale.x : 1), it.base.scale ? it.base.scale.y : 1,
+                          it.base.scale ? it.base.scale.z : 1);
+      } else if (m.kind === 'slide' && m.rotFrom && m.rotTo) {
+        const rr = (p, q2) => (p + (q2 - p) * k) * D2R;
+        it.node.rotation.set(rr(m.rotFrom[0], m.rotTo[0]), rr(m.rotFrom[1], m.rotTo[1]), rr(m.rotFrom[2], m.rotTo[2]));
+      }
+      // 滚过桌沿后自由落体（用来验证“抽掉挡条会发生什么”）
+      if (m.fallAfter !== undefined && t > m.fallAfter) {
+        const dt = t - m.fallAfter;
+        it.node.position.y -= 0.5 * 9.8 * dt * dt;
+        const sp = m.speed || 0;
+        it.node.position.x += sp * dt * (m.dirX === undefined ? 1 : m.dirX);
+        it.node.quaternion.setFromAxisAngle(new THREE.Vector3(...(m.axis || [0, 0, -1])).normalize(),
+                                            (m.angle || 0) + sp * dt / (m.radius || 0.05));
+      }
+      if (it.decal) {
+        const r = m.radius || 0.06;
+        const yb = Math.min(f[1], q[1]) - r;
+        it.decal.position.set(it.node.position.x, yb + 0.004, it.node.position.z);
+        const lift = Math.max(0, (it.node.position.y - r) - yb);
+        it.decal.material.opacity = 0.62 * clamp(1 - lift / 0.35, 0, 1);
+      }
+      if (m.visible && m.visible.t0 !== undefined) {
+        it.node.visible = t >= m.visible.t0 && t <= (m.visible.t1 ?? 1e9);
+      }
+      continue;
+    }
+    // 2) 旧的通用动画（灯位扫动、开关灯强度）
+    const a = it.anim;
+    if (!a) continue;
+    const t0 = a.t0 ?? 0, t1 = (a.t1 ?? S.duration) || 1;
+    let k = clamp((t - t0) / Math.max(1e-6, t1 - t0), 0, 1);
+    if (a.ease === 'inout') k = k * k * (3 - 2 * k);
+    else if (a.ease === 'out') k = 1 - (1 - k) * (1 - k);
+    if (a.posFrom && a.posTo) {
+      const from = a.posFrom, to = a.posTo;
+      it.node.position.set(from[0] + (to[0] - from[0]) * k,
+                           from[1] + (to[1] - from[1]) * k,
+                           from[2] + (to[2] - from[2]) * k);
+      if (it.isLight && it.node.target) {
+        const tf = a.targetFrom || from, tt = a.targetTo || to;
+        it.node.target.position.set(tf[0] + (tt[0] - tf[0]) * k,
+                                    tf[1] + (tt[1] - tf[1]) * k,
+                                    tf[2] + (tt[2] - tf[2]) * k);
+      }
+    }
+    if (a.rotFrom && a.rotTo) {
+      it.node.rotation.set((a.rotFrom[0] + (a.rotTo[0] - a.rotFrom[0]) * k) * D2R,
+                           (a.rotFrom[1] + (a.rotTo[1] - a.rotFrom[1]) * k) * D2R,
+                           (a.rotFrom[2] + (a.rotTo[2] - a.rotFrom[2]) * k) * D2R);
+    }
+    if (it.isLight && (a.intensityFrom !== undefined || a.intensityTo !== undefined)) {
+      const i0 = a.intensityFrom ?? it.base.intensity;
+      const i1 = a.intensityTo ?? it.base.intensity;
+      it.node.intensity = i0 + (i1 - i0) * easeK(clamp((t - (a.lightT0 ?? t0)) / Math.max(1e-6, (a.lightT1 ?? t1) - (a.lightT0 ?? t0)), 0, 1), a.lightEase || 'inout');
+    }
+    if (a.visible && a.visible.t0 !== undefined) {
+      it.node.visible = t >= a.visible.t0 && t <= (a.visible.t1 ?? 1e9);
+    }
+    if (a.pulse) {
+      const ph = a.pulse;
+      const s = 0.85 + 0.15 * Math.sin(t * (ph * 6.2832));
+      it.node.position.y = it.base.pos.y + (s - 0.85) * 0.04;
+    }
+  }
+}
+function buildScene() {
+  for (const { mesh } of builtObjects) {
+    mesh.parent && mesh.parent.remove(mesh);
+    mesh.geometry && mesh.geometry.dispose();
+    mesh.customDepthMaterial?.dispose();
+    mesh.customDistanceMaterial?.dispose();
+    if (mesh.material) { Array.isArray(mesh.material) ? mesh.material.forEach(m => m.dispose()) : mesh.material.dispose(); }
+  }
+  builtObjects = [];
+  animated.length = 0;
+  const root = new THREE.Group();
+  scene.add(root);
+  for (const o of S.objects || []) {
+    const node = buildObject(o, root, builtObjects);
+    if (node && (o.anim || o.motion)) {
+      registerAnim(node, o, false);
+      const it = animated[animated.length - 1];
+      if (o.motion) {
+        it.motion = o.motion;
+        const r = o.motion.radius || 0.06;
+        const geo = new THREE.PlaneGeometry(1, 1);
+        geo.rotateX(-Math.PI / 2);
+        const mat = new THREE.MeshBasicMaterial({
+          map: TEX.contact, transparent: true, opacity: 0.62, depthWrite: false,
+          color: 0x000000, blending: THREE.NormalBlending, fog: false,
+        });
+        const decal = new THREE.Mesh(geo, mat);
+        decal.scale.set(r * 4.2, 1, r * 4.2);
+        decal.renderOrder = 2;
+        const p = o.motion.from;
+        decal.position.set(p[0], p[1] - r + 0.004, p[2]);
+        root.add(decal);
+        it.decal = decal;
+        builtObjects.push({ mesh: decal, spec: { contact: false } });
+      }
+    }
+  }
+  buildGround();
+  bakeAO(builtObjects);
+  groundUniforms.uAO.value = aoTex;
+  for (const { spec, light } of lights) registerAnim(light, spec, true);
+  return root;
+}
+const root = buildScene();
+
+/* ---------- 反射 RT ---------- */
+function ensureRT() {
+  const rw = Math.round(W * 0.5), rh = Math.round(H * 0.5);
+  if (reflectRT && reflectRT.width === rw && reflectRT.height === rh) return;
+  if (reflectRT) reflectRT.dispose();
+  reflectRT = new THREE.WebGLRenderTarget(rw, rh, {
+    type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+    depthBuffer: true, stencilBuffer: false,
+  });
+  groundUniforms.uReflect.value = reflectRT.texture;
+}
+
+/* ---------- 相机 ---------- */
+const camState = { az: S.camera.az, el: S.camera.el, dist: S.camera.dist, tgt: new THREE.Vector3(...S.camera.target) };
+const CAM_KEYS = (S.camera.keys || []).slice().sort((a, b) => a.t - b.t);
+const _v3a = new THREE.Vector3(), _v3b = new THREE.Vector3();
+// 局部目标：把镜头对到“某个物体上的一个点”，物体动了目标跟着动
+const byName = new Map();
+(function indexNames() {
+  root.traverse(n => {
+    const s = n.userData && n.userData.spec;
+    if (s && s.name && !byName.has(s.name)) byName.set(s.name, n);
+  });
+})();
+function refWorld(ref) {
+  const n = byName.get(ref.name);
+  if (!n) return null;
+  n.updateWorldMatrix(true, false);
+  return n.localToWorld(new THREE.Vector3(...(ref.local || [0, 0, 0])));
+}
+function keyTarget(k) {
+  const ref = k && (k.targetRef || k.target_ref);
+  if (ref) {
+    const w = refWorld(ref);
+    if (w) return [w.x, w.y, w.z];
+  }
+  return k ? (k.target || S.camera.target) : [0, 0, 0];
+}
+function camParamsAt(t) {
+  // keys 模式：段落之间平滑插值；下一关键帧标了 cut 的，段落内保持上一帧参数，到点硬切
+  if (!CAM_KEYS.length) return null;
+  if (t <= CAM_KEYS[0].t) { const k0 = CAM_KEYS[0]; return { ...S.camera, ...k0, target: keyTarget(k0) }; }
+  let i = 0;
+  for (let k = 0; k < CAM_KEYS.length; k++) if (CAM_KEYS[k].t <= t) i = k;
+  const a = { ...S.camera, ...CAM_KEYS[i] };
+  const b = CAM_KEYS[i + 1] ? { ...S.camera, ...CAM_KEYS[i + 1] } : null;
+  const ta = keyTarget(a);
+  if (!b || b === a || b.cut) return { ...a, target: ta };
+  const span = Math.max(1e-6, b.t - a.t);
+  let k = clamp((t - a.t) / span, 0, 1);
+  k = k * k * (3 - 2 * k);
+  const lerp = (p, q) => (p ?? q) + ((q ?? p) - (p ?? q)) * k;
+  const tb = keyTarget(b);
+  return {
+    az: lerp(a.az, b.az), el: lerp(a.el, b.el), dist: lerp(a.dist, b.dist),
+    fov: lerp(a.fov, b.fov), focus: lerp(a.focus, b.focus),
+    target: [lerp(ta[0], tb[0]), lerp(ta[1], tb[1]), lerp(ta[2], tb[2])],
+  };
+}
+function cameraAt(t) {
+  const c = S.camera;
+  const kp = camParamsAt(t);
+  const az = ((kp ? kp.az : c.az) + (kp ? 0 : (c.azDrift ?? 0) * (S.duration > 0 ? t / S.duration : 0))) * D2R;
+  const el = ((kp ? kp.el : c.el) + (kp ? 0 : (c.elDrift ?? 0) * (S.duration > 0 ? t / S.duration : 0))) * D2R;
+  const dist = (kp ? kp.dist : c.dist) + (kp ? 0 : (c.distDrift ?? 0) * (S.duration > 0 ? t / S.duration : 0));
+  const tgtArr = kp ? kp.target : c.target;
+  const tgt = new THREE.Vector3(...(tgtArr || [0, 1, 0]));
+  if (!kp) tgt.y += (c.rise ?? 0) * (S.duration > 0 ? t / S.duration : 0);
+  const pos = new THREE.Vector3(
+    tgt.x + Math.sin(az) * Math.cos(el) * dist,
+    tgt.y + Math.sin(el) * dist,
+    tgt.z + Math.cos(az) * Math.cos(el) * dist);
+  if (!kp && c.mode === 'dolly') {
+    const s = 0.92 + 0.10 * (S.duration > 0 ? t / S.duration : 0);
+    pos.sub(tgt).multiplyScalar(s).add(tgt);
+  }
+  if (c.handheld) {
+    const a = c.handheld;
+    pos.x += Math.sin(t * 1.7) * a * 0.12; pos.y += Math.sin(t * 2.3 + 1.1) * a * 0.08;
+    tgt.x += Math.sin(t * 1.1 + 0.4) * a * 0.05;
+  }
+  const fov = (kp && kp.fov) || c.fov;
+  // 近裁剪面跟着机位距离走：微距（dist 5–10cm）时固定 0.1 会把整个主体剪掉
+  const nearAuto = Math.max(0.004, Math.min(0.1, dist * 0.08));
+  const near = (kp && kp.near) || c.near || nearAuto;
+  camera.fov = fov; camera.aspect = W / H; camera.near = near; camera.far = Math.max(60, dist * 40);
+  camera.position.copy(pos); camera.up.set(0, 1, 0); camera.lookAt(tgt);
+  camera.updateProjectionMatrix(); camera.updateMatrixWorld(true);
+  finalMat.uniforms.uFocus.value = kp?.focus ?? c.focus ?? dist;
+  finalMat.uniforms.uNear.value = near;
+  finalMat.uniforms.uFar.value = camera.far;
+  return tgt;
+}
+
+/* ---------- 后期 ---------- */
+const sceneRT = new THREE.WebGLRenderTarget(W, H, {
+  type: THREE.HalfFloatType, depthBuffer: true, stencilBuffer: false,
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+});
+sceneRT.depthTexture = new THREE.DepthTexture(W, H);
+sceneRT.depthTexture.type = THREE.UnsignedIntType;
+
+const fsGeo = new THREE.PlaneGeometry(2, 2);
+const fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const fsScene = new THREE.Scene();
+const fsMesh = new THREE.Mesh(fsGeo, null);
+fsMesh.frustumCulled = false; fsScene.add(fsMesh);
+function fsPass(mat) { fsMesh.material = mat; renderer.setRenderTarget(null); renderer.render(fsScene, fsCam); }
+
+let bloomRT = {};
+function mkRT(w, h) {
+  return new THREE.WebGLRenderTarget(Math.max(2, w), Math.max(2, h), {
+    type: THREE.HalfFloatType, depthBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter });
+}
+function ensureBloom() {
+  if (bloomRT.bright) return;
+  bloomRT.bright = mkRT(Math.round(W / 2), Math.round(H / 2));
+  bloomRT.a = mkRT(Math.round(W / 2), Math.round(H / 2));
+  bloomRT.b = mkRT(Math.round(W / 2), Math.round(H / 2));
+  bloomRT.c = mkRT(Math.round(W / 4), Math.round(H / 4));
+  bloomRT.d = mkRT(Math.round(W / 4), Math.round(H / 4));
+}
+const brightMat = new THREE.ShaderMaterial({
+  uniforms: { uTex: { value: null }, uThresh: { value: S.post.bloomThresh } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv; uniform sampler2D uTex; uniform float uThresh;
+    void main(){ vec3 c = texture2D(uTex, vUv).rgb; float l = max(max(c.r,c.g),c.b);
+      gl_FragColor = vec4(c * smoothstep(uThresh, uThresh + 0.35, l), 1.0); }`,
+});
+const blurMat = new THREE.ShaderMaterial({
+  uniforms: { uTex: { value: null }, uDir: { value: new THREE.Vector2(1, 0) }, uStep: { value: 1.0 },
+              uTexel: { value: new THREE.Vector2(1 / 960, 1 / 540) } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    varying vec2 vUv; uniform sampler2D uTex; uniform vec2 uDir, uTexel; uniform float uStep;
+    void main(){
+      vec2 d = uDir * uTexel * uStep;
+      vec3 c = texture2D(uTex, vUv).rgb * 0.227;
+      c += texture2D(uTex, vUv + d * 1.3846).rgb * 0.316;
+      c += texture2D(uTex, vUv - d * 1.3846).rgb * 0.316;
+      c += texture2D(uTex, vUv + d * 3.2308).rgb * 0.070;
+      c += texture2D(uTex, vUv - d * 3.2308).rgb * 0.070;
+      gl_FragColor = vec4(c, 1.0);
+    }`,
+});
+const finalMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uScene: { value: null }, uBloomA: { value: null }, uBloomB: { value: null }, uDepth: { value: null },
+    uExposure: { value: S.post.exposure }, uBloomAmt: { value: S.post.bloom },
+    uGrain: { value: S.post.grain }, uVig: { value: S.post.vignette }, uCA: { value: S.post.ca },
+    uSat: { value: S.post.sat }, uContrast: { value: S.post.contrast },
+    uDof: { value: S.post.dof }, uDofMax: { value: S.post.dofMax },
+    uFocus: { value: S.camera.focus ?? 15 }, uNear: { value: 0.1 }, uFar: { value: 220 },
+    uTime: { value: 0 }, uRes: { value: new THREE.Vector2(W, H) },
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    varying vec2 vUv;
+    uniform sampler2D uScene, uBloomA, uBloomB, uDepth;
+    uniform float uExposure, uBloomAmt, uGrain, uVig, uCA, uSat, uContrast, uDof, uDofMax, uFocus, uNear, uFar, uTime;
+    uniform vec2 uRes;
+    vec3 aces(vec3 x){
+      const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
+      return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+    }
+    float linDepth(vec2 uv){
+      float d = texture2D(uDepth, uv).x;
+      return (uNear * uFar) / (uFar - d * (uFar - uNear));
+    }
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(41.7, 289.3))) * 43758.5453); }
+    void main(){
+      vec2 uv = vUv;
+      vec2 cen = uv - 0.5;
+      // 色差：只加在边缘
+      float r2 = dot(cen, cen);
+      vec2 off = cen * uCA * (0.35 + r2 * 2.6);
+      vec3 col;
+      col.r = texture2D(uScene, uv + off).r;
+      col.g = texture2D(uScene, uv).g;
+      col.b = texture2D(uScene, uv - off).b;
+      // 景深：按 CoC 做圆盘采样
+      float z = linDepth(uv);
+      float coc = clamp(abs(z - uFocus) / max(uFocus, 0.001) * uDof, 0.0, 1.0) * uDofMax;
+      if (coc > 0.0006) {
+        vec3 acc = vec3(0.0); float wsum = 0.0;
+        for (int i = 0; i < 12; i++) {
+          float fi = float(i);
+          float ang = fi * 2.399963;
+          float rad = sqrt(fi / 12.0) * coc;
+          vec2 suv = uv + vec2(cos(ang), sin(ang)) * rad * vec2(uRes.y / uRes.x, 1.0) * 1.2;
+          vec3 cs = texture2D(uScene, suv).rgb;
+          float cz = linDepth(suv);
+          float w = smoothstep(coc * 0.15, coc, abs(cz - uFocus) / max(uFocus, 0.001) * uDof * uDofMax) + 0.25;
+          acc += cs * w; wsum += w;
+        }
+        col = acc / wsum;
+      }
+      col += texture2D(uBloomA, uv).rgb * uBloomAmt
+           + texture2D(uBloomB, uv).rgb * uBloomAmt * 1.6;
+      col = aces(col * uExposure);
+      col = pow(col, vec3(1.0 / 2.2));
+      // 对比 / 饱和
+      col = (col - 0.5) * uContrast + 0.5;
+      float l = dot(col, vec3(0.299, 0.587, 0.114));
+      col = mix(vec3(l), col, uSat);
+      // 暗角
+      col *= 1.0 - uVig * smoothstep(0.18, 0.85, r2 * 2.2);
+      // 颗粒（暗部更明显）
+      float g = hash(uv * uRes + uTime * 37.0) - 0.5;
+      col += g * uGrain * (1.0 - 0.55 * l);
+      gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+    }`,
+});
+
+function renderReflection() {
+  ensureRT();
+  mirrorCam.copy(camera);
+  const tgt = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).add(camera.position);
+  const twiceY = 2 * ground.position.y;
+  mirrorCam.position.set(camera.position.x, twiceY - camera.position.y, camera.position.z);
+  const mt = new THREE.Vector3(tgt.x, twiceY - tgt.y, tgt.z);
+  mirrorCam.up.set(0, -1, 0);
+  mirrorCam.lookAt(mt);
+  mirrorCam.updateMatrixWorld(true);
+  mirrorCam.updateProjectionMatrix();
+  texMatrix.set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1);
+  texMatrix.multiply(mirrorCam.projectionMatrix);
+  texMatrix.multiply(mirrorCam.matrixWorldInverse);
+  groundUniforms.uTexMat.value.copy(texMatrix);
+  ground.visible = false;
+  rain && (rain.visible = false);
+  const clipY = (S.ground.y ?? 0) - 0.001;
+  renderer.clippingPlanes = [new THREE.Plane(new THREE.Vector3(0, 1, 0), -clipY)];
+  renderer.setRenderTarget(reflectRT);
+  renderer.clear();
+  renderer.render(scene, mirrorCam);
+  renderer.clippingPlanes = [];
+  renderer.setRenderTarget(null);
+  ground.visible = true;
+  rain && (rain.visible = true);
+}
+
+/* ---------- 水坑涟漪用的时间 ---------- */
+function setTime(t) {
+  foliageTime.value = t;
+  groundUniforms.uTime.value = t;
+  if (rainUniforms) rainUniforms.uTime.value = t;
+}
+
+/* ---------- 每帧 ---------- */
+const fixedReflectionScene = !window.decorateSpace && !animated.some(it => it.anim || it.motion)
+  && !builtObjects.some(({ spec }) => spec.wind?.strength > 0);
+if (S.ground.physicalLighting && fixedReflectionScene) {
+  // The light-space maps for this static scene can also serve a moving camera.
+  renderer.shadowMap.autoUpdate = false;
+  renderer.shadowMap.needsUpdate = true;
+}
+const previousView = new THREE.Matrix4(), previousProjection = new THREE.Matrix4();
+let reflectionReady = false;
+function renderFrame(t) {
+  setTime(t);
+  applyAnim(t);
+  cameraAt(t);
+  if (groundUniforms.uReflectivity.value !== 0 &&
+      (!fixedReflectionScene || !reflectionReady || !previousView.equals(camera.matrixWorld) ||
+       !previousProjection.equals(camera.projectionMatrix))) {
+    renderReflection();
+    previousView.copy(camera.matrixWorld);
+    previousProjection.copy(camera.projectionMatrix);
+    reflectionReady = true;
+  }
+  renderer.setRenderTarget(sceneRT);
+  renderer.clear();
+  renderer.render(scene, camera);
+  // bloom：亮部提取 → 三级模糊（ping-pong，避免同 RT 读写）
+  if (finalMat.uniforms.uBloomAmt.value !== 0) {
+    ensureBloom();
+    const B = bloomRT;
+    brightMat.uniforms.uTex.value = sceneRT.texture;
+    fsMesh.material = brightMat;
+    renderer.setRenderTarget(B.bright); renderer.clear(); renderer.render(fsScene, fsCam);
+    blurMat.uniforms.uTexel.value.set(1 / B.bright.width, 1 / B.bright.height);
+    blurMat.uniforms.uStep.value = 1.0;
+    blurMat.uniforms.uTex.value = B.bright.texture; blurMat.uniforms.uDir.value.set(1, 0);
+    fsMesh.material = blurMat;
+    renderer.setRenderTarget(B.a); renderer.clear(); renderer.render(fsScene, fsCam);
+    blurMat.uniforms.uTex.value = B.a.texture; blurMat.uniforms.uDir.value.set(0, 1);
+    renderer.setRenderTarget(B.b); renderer.clear(); renderer.render(fsScene, fsCam);
+    // 1/4 分辨率再糊一层，做宽光晕
+    blurMat.uniforms.uTexel.value.set(1 / B.c.width, 1 / B.c.height);
+    blurMat.uniforms.uStep.value = 1.6;
+    blurMat.uniforms.uTex.value = B.b.texture; blurMat.uniforms.uDir.value.set(1, 0);
+    renderer.setRenderTarget(B.c); renderer.clear(); renderer.render(fsScene, fsCam);
+    blurMat.uniforms.uTex.value = B.c.texture; blurMat.uniforms.uDir.value.set(0, 1);
+    renderer.setRenderTarget(B.d); renderer.clear(); renderer.render(fsScene, fsCam);
+    // final：两档光晕叠加
+    finalMat.uniforms.uBloomA.value = B.b.texture;
+    finalMat.uniforms.uBloomB.value = B.d.texture;
+  }
+  finalMat.uniforms.uScene.value = sceneRT.texture;
+  finalMat.uniforms.uDepth.value = sceneRT.depthTexture;
+  finalMat.uniforms.uTime.value = t;
+  fsPass(finalMat);
+}
+
+window.FILM = { width: W, height: H, fps: S.fps, duration: S.duration };
+window.SPACE_DEBUG = { S, builtObjects, groundUniforms, renderer, scene, camera };
+window.renderFrame = (t) => { renderFrame(t); };
+renderFrame(0);
+</script></body></html>

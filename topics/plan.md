@@ -1,0 +1,2 @@
+plan.json 含 title、brief、shots。每镜写 source、seconds、based_on（用户原话）、visible（观众所见）。开放题可运行 film.cmd pitch。复杂镜头写独立 JS 模块，用 film.cmd stage --module shots/a.mjs --out shots/a.html。模块导出 spec，可导出 setup({THREE,scene,root,camera,overlay}) 并返回按绝对秒数更新的函数；source 填生成的 HTML。手写 HTML 则提供 window.renderFrame(t)，t 为镜内秒数。含叠字或 CSS 效果时使用整页截图；仅在单 Canvas 已含最终全部像素时可设 window.filmCanvas 与 window.filmCanvasOnly=true 启用直出。source 相对 plan.json，based_on 必须逐字出现在 brief 中。只读当前镜头；已定稿的选择写回计划。接续已有工程用 film.cmd handoff --plan plan.json --out film.mp4。
+
