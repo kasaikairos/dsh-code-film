@@ -10,6 +10,14 @@
 - 编排镜头位置、轨迹、构图和光影，预览关键镜头。
 - 规划分段配乐，检查渲染与导出质量，在 Windows 上本机导出最高 4K 的视频。
 
+## 成品演示
+
+**《FIRST LIGHT》**是目前唯一一段角色扮演成品视频，时长 1 分 46 秒。
+
+[![《FIRST LIGHT》片中截图](examples/first-light.jpg)](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-1080p.mp4)
+
+[1080p 预览版](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-1080p.mp4) · [4K 原版](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-4K.mp4)
+
 ## Windows 安装
 
 1. 安装 [Blender](https://www.blender.org/download/)。先启动一次，确认可正常打开。Blender 用于 3D 建模与渲染，安装脚本需另外检查运行包所用的系统组件。
@@ -38,6 +46,12 @@ DSH Code Film is a Skill for code-driven 3D animation workflows with DeepSeek.
 - Set up camera paths, composition, and lighting, then preview key shots.
 - Plan music by section, review render and export quality, and export video at up to 4K locally on Windows.
 
+### Finished video
+
+**FIRST LIGHT** is the only finished roleplay sample currently available. It runs for 1 minute and 46 seconds.
+
+[1080p preview](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-1080p.mp4) · [4K original](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-4K.mp4)
+
 ### Setup and usage
 
 1. Install [Blender](https://www.blender.org/download/) for 3D modeling and rendering, then launch it once to verify that it opens.
@@ -48,3 +62,4 @@ DSH Code Film is a Skill for code-driven 3D animation workflows with DeepSeek.
 ### License
 
 The original Skill files and documentation use [0BSD](LICENSE). The engine retains its [MIT license](engine/LICENSE). Third-party components and assets retain their accompanying licenses.
+
