@@ -16,7 +16,7 @@
 
 [![《FIRST LIGHT》片中截图](examples/first-light.jpg)](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-1080p.mp4)
 
-[1080p 预览版](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-1080p.mp4) · [4K 原版](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-4K.mp4)
+[1080p 预览版](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-1080p.mp4) · [4K 压缩观看版](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-4K.mp4)
 
 ## Windows 安装
 
@@ -48,7 +48,7 @@ DSH Code Film is a Skill for code-driven 3D animation workflows with DeepSeek.
 
 **FIRST LIGHT** is the only finished roleplay sample currently available. It runs for 1 minute and 46 seconds.
 
-[1080p preview](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-1080p.mp4) · [4K original](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-4K.mp4)
+[1080p preview](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-1080p.mp4) · [4K viewing copy](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/FIRST_LIGHT-4K.mp4)
 
 ### Setup and usage
 
