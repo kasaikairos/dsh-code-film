@@ -2,6 +2,14 @@
 
 面向 DeepSeek 的代码驱动 3D 动画制作 Skill，包含场景构建、分镜、镜头与运动编排，以及 Windows 本机渲染与导出流程。
 
+中文 · [English](#english)
+
+## 可以做什么
+
+- 规划镜头和分镜，用代码搭建 3D 场景并安排物体运动。
+- 编排镜头位置、轨迹、构图和光影，预览关键镜头。
+- 规划分段配乐，检查渲染与导出质量，在 Windows 上本机导出最高 4K 的视频。
+
 ## Windows 安装
 
 1. 安装 [Blender](https://www.blender.org/download/)。先启动一次，确认可正常打开。Blender 用于 3D 建模与渲染，安装脚本需另外检查运行包所用的系统组件。
@@ -19,3 +27,24 @@
 ## 许可
 
 本项目自有的 Skill 源码和文档采用 [0BSD](LICENSE)。引擎保留 [MIT 许可](engine/LICENSE)，第三方组件和素材适用其随附许可。
+
+## English
+
+DSH Code Film is a Skill for code-driven 3D animation workflows with DeepSeek.
+
+### What it does
+
+- Plan shots and storyboards, build 3D scenes in code, and choreograph object motion.
+- Set up camera paths, composition, and lighting, then preview key shots.
+- Plan music by section, review render and export quality, and export video at up to 4K locally on Windows.
+
+### Setup and usage
+
+1. Install [Blender](https://www.blender.org/download/) for 3D modeling and rendering, then launch it once to verify that it opens.
+2. Download the Windows x64 runtime from [Releases](https://github.com/kasaikairos/dsh-code-film/releases) and extract the entire archive.
+3. Run `START-HERE.cmd` from the extracted folder. It checks for Python 3.12 x64, Node.js 22.12 or later, Chrome, FFmpeg, and the local runtime. Install Blender separately in step 1.
+4. Load the extracted `code-film-render` folder as a Skill in your DeepSeek workspace. The Skill entry point is `SKILL.md`.
+
+### License
+
+The original Skill files and documentation use [0BSD](LICENSE). The engine retains its [MIT license](engine/LICENSE). Third-party components and assets retain their accompanying licenses.
