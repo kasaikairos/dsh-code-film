@@ -23,7 +23,9 @@
 1. 安装 [Blender](https://www.blender.org/download/)。先启动一次，确认可正常打开。Blender 用于 3D 建模与渲染，安装脚本需另外检查运行包所用的系统组件。
 2. 下载 [Windows x64 运行包](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/DSH-CodeFilm-Runtime-2083.10-Windows-x64.zip)，完整解压。保留解压后的目录结构。
 3. 运行解压目录里的 `START-HERE.cmd`。它会检查 Python 3.12 x64、Node.js（至少 22.12）、Chrome、FFmpeg 和本地运行环境，并列出可以选择安装的缺项。Blender 需要按第 1 步安装。
-4. 在支持 Skill 的 DeepSeek 工作环境中导入解压后的 `code-film-render` 目录。Skill 入口是 `SKILL.md`，命令行入口是 `film.cmd`。
+4. 在 DSH（DeepSeek Harness）中加载解压后的 `code-film-render` 文件夹。Skill 入口是 `SKILL.md`，命令行入口是 `film.cmd`。
+
+其他支持 [Agent Skills](https://agentskills.io/specification) 格式的 AI 工具，也可按各自的导入方式加载同一个文件夹。要在工具内执行本机渲染，宿主还需能访问项目文件并运行 Windows 命令。
 
 ## 仓库内容
 
@@ -55,7 +57,9 @@ DSH Code Film is a Skill for code-driven 3D animation workflows with DeepSeek.
 1. Install [Blender](https://www.blender.org/download/) for 3D modeling and rendering, then launch it once to verify that it opens.
 2. Download the [Windows x64 runtime](https://github.com/kasaikairos/dsh-code-film/releases/download/v2083.10/DSH-CodeFilm-Runtime-2083.10-Windows-x64.zip) and extract the entire archive.
 3. Run `START-HERE.cmd` from the extracted folder. It checks for Python 3.12 x64, Node.js 22.12 or later, Chrome, FFmpeg, and the local runtime. Install Blender separately in step 1.
-4. Load the extracted `code-film-render` folder as a Skill in your DeepSeek workspace. The Skill entry point is `SKILL.md`.
+4. Load the extracted `code-film-render` folder as a Skill in DSH (DeepSeek Harness). The Skill entry point is `SKILL.md`, and the command-line entry point is `film.cmd`.
+
+Other AI tools that support the [Agent Skills](https://agentskills.io/specification) format can load the same folder using their own import workflow. For local rendering from within the tool, the host also needs access to the project files and the ability to run Windows commands.
 
 ### Repository layout
 
