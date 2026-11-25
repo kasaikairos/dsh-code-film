@@ -4,6 +4,8 @@
 
 中文 · [English](#english)
 
+[Skill 源码](skills/code-film-render/) · [引擎源码](engine/) · [Windows 运行包和样片](https://github.com/kasaikairos/dsh-code-film/releases/tag/v2083.10)
+
 ## 可以做什么
 
 - 规划镜头和分镜，用代码搭建 3D 场景并安排物体运动。
@@ -39,6 +41,8 @@
 ## English
 
 DSH Code Film is a Skill for code-driven 3D animation workflows with DeepSeek.
+
+[Skill source](skills/code-film-render/) · [Engine source](engine/) · [Windows runtime and sample video](https://github.com/kasaikairos/dsh-code-film/releases/tag/v2083.10)
 
 ### What it does
 
